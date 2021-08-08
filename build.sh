@@ -182,7 +182,7 @@ for TARGET in "${TARGETS[@]}"; do
   for PLATFORM in "${PLATFORMS[@]}"; do
     export GOOS=$(cut -d'/' -f1 <<< $PLATFORM)
     export GOARCH=$(cut -d'/' -f2 <<< $PLATFORM)
-    BINARY_NAME="$TARGET-${GOOS}-${GOARCH}"
+    BINARY_NAME="lighthouse-$TARGET-${GOOS}-${GOARCH}"
     if [ $DEFAULT_GOOS == $GOOS ]; then
       export TEST_BINARY_NAME="$CWD/bin/$BINARY_NAME"
     fi

@@ -17,7 +17,7 @@ type ResourceGenerationOrFinalizerChangedPredicate struct {
 // Update implements default UpdateEvent filter for validating resource version change
 func (ResourceGenerationOrFinalizerChangedPredicate) CreateFunc(e event.CreateEvent) bool {
 	ns := e.Object.GetNamespace()
-	if ns == "kube-system" || ns == "tugboat" {
+	if ns == "kube-system" || ns == "lighthouse" {
 		return false
 	}
 	return true

@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/object88/lighthouse/internal/logging/testlogger"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -12,6 +13,9 @@ import (
 )
 
 func Test_Controller_Event(t *testing.T) {
+	s := natsserver.RunDefaultServer()
+	defer s.Shutdown()
+
 	namespace := "foo"
 
 	e := v1.Event{}
@@ -21,6 +25,7 @@ func Test_Controller_Event(t *testing.T) {
 		Log:    testlogger.TestLogger{T: t},
 		// VersionedClient: fake.NewSimpleClientset(rel),
 	}
+	rs.connectToQueue()
 
 	req := reconcile.Request{
 		NamespacedName: types.NamespacedName{
@@ -34,4 +39,6 @@ func Test_Controller_Event(t *testing.T) {
 	} else if result.Requeue {
 		t.Errorf("Unexpectedly set to requeue")
 	}
+
+	// s.
 }
