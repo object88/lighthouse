@@ -58,6 +58,7 @@ const (
 	wsMaxFrameHeaderSize    = 14 // Since LeafNode may need to behave as a client
 	wsMaxControlPayloadSize = 125
 	wsFrameSizeForBrowsers  = 4096 // From experiment, webrowsers behave better with limited frame size
+	wsCloseSatusSize        = 2
 
 	// From https://tools.ietf.org/html/rfc6455#section-11.7
 	wsCloseStatusNormalClosure      = 1000
@@ -75,7 +76,6 @@ const (
 	wsFirstFrame        = true
 	wsContFrame         = false
 	wsFinalFrame        = true
-	wsCompressedFrame   = true
 	wsUncompressedFrame = false
 
 	wsSchemePrefix    = "ws"
@@ -92,6 +92,7 @@ const (
 )
 
 var decompressorPool sync.Pool
+var compressLastBlock = []byte{0x00, 0x00, 0xff, 0xff, 0x01, 0x00, 0x00, 0xff, 0xff}
 
 // From https://tools.ietf.org/html/rfc6455#section-1.3
 var wsGUID = []byte("258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
@@ -144,7 +145,8 @@ type wsReadInfo struct {
 	mask  bool // Incoming leafnode connections may not have masking.
 	mkpos byte
 	mkey  [4]byte
-	buf   []byte
+	cbufs [][]byte
+	coff  int
 }
 
 func (r *wsReadInfo) init() {
@@ -292,40 +294,116 @@ func (c *client) wsRead(r *wsReadInfo, ior io.Reader, buf []byte) ([][]byte, err
 			b = buf[pos : pos+n]
 			pos += n
 			r.rem -= n
-			if r.fc {
-				r.buf = append(r.buf, b...)
-				b = r.buf
+			// If needed, unmask the buffer
+			if r.mask {
+				r.unmask(b)
 			}
-			if !r.fc || r.rem == 0 {
-				if r.mask {
-					r.unmask(b)
-				}
-				if r.fc {
-					// As per https://tools.ietf.org/html/rfc7692#section-7.2.2
-					// add 0x00, 0x00, 0xff, 0xff and then a final block so that flate reader
-					// does not report unexpected EOF.
-					b = append(b, 0x00, 0x00, 0xff, 0xff, 0x01, 0x00, 0x00, 0xff, 0xff)
-					br := bytes.NewBuffer(b)
-					d, _ := decompressorPool.Get().(io.ReadCloser)
-					if d == nil {
-						d = flate.NewReader(br)
-					} else {
-						d.(flate.Resetter).Reset(br, nil)
-					}
-					b, err = ioutil.ReadAll(d)
-					decompressorPool.Put(d)
+			addToBufs := true
+			// Handle compressed message
+			if r.fc {
+				// Assume that we may have continuation frames or not the full payload.
+				addToBufs = false
+				// Make a copy of the buffer before adding it to the list
+				// of compressed fragments.
+				r.cbufs = append(r.cbufs, append([]byte(nil), b...))
+				// When we have the final frame and we have read the full payload,
+				// we can decompress it.
+				if r.ff && r.rem == 0 {
+					b, err = r.decompress()
 					if err != nil {
 						return bufs, err
 					}
+					r.fc = false
+					// Now we can add to `bufs`
+					addToBufs = true
 				}
+			}
+			// For non compressed frames, or when we have decompressed the
+			// whole message.
+			if addToBufs {
 				bufs = append(bufs, b)
-				if r.rem == 0 {
-					r.fs, r.fc, r.buf = true, false, nil
-				}
+			}
+			// If payload has been fully read, then indicate that next
+			// is the start of a frame.
+			if r.rem == 0 {
+				r.fs = true
 			}
 		}
 	}
 	return bufs, nil
+}
+
+func (r *wsReadInfo) Read(dst []byte) (int, error) {
+	if len(dst) == 0 {
+		return 0, nil
+	}
+	if len(r.cbufs) == 0 {
+		return 0, io.EOF
+	}
+	copied := 0
+	rem := len(dst)
+	for buf := r.cbufs[0]; buf != nil && rem > 0; {
+		n := len(buf[r.coff:])
+		if n > rem {
+			n = rem
+		}
+		copy(dst[copied:], buf[r.coff:r.coff+n])
+		copied += n
+		rem -= n
+		r.coff += n
+		buf = r.nextCBuf()
+	}
+	return copied, nil
+}
+
+func (r *wsReadInfo) nextCBuf() []byte {
+	// We still have remaining data in the first buffer
+	if r.coff != len(r.cbufs[0]) {
+		return r.cbufs[0]
+	}
+	// We read the full first buffer. Reset offset.
+	r.coff = 0
+	// We were at the last buffer, so we are done.
+	if len(r.cbufs) == 1 {
+		r.cbufs = nil
+		return nil
+	}
+	// Here we move to the next buffer.
+	r.cbufs = r.cbufs[1:]
+	return r.cbufs[0]
+}
+
+func (r *wsReadInfo) ReadByte() (byte, error) {
+	if len(r.cbufs) == 0 {
+		return 0, io.EOF
+	}
+	b := r.cbufs[0][r.coff]
+	r.coff++
+	r.nextCBuf()
+	return b, nil
+}
+
+func (r *wsReadInfo) decompress() ([]byte, error) {
+	r.coff = 0
+	// As per https://tools.ietf.org/html/rfc7692#section-7.2.2
+	// add 0x00, 0x00, 0xff, 0xff and then a final block so that flate reader
+	// does not report unexpected EOF.
+	r.cbufs = append(r.cbufs, compressLastBlock)
+	// Get a decompressor from the pool and bind it to this object (wsReadInfo)
+	// that provides Read() and ReadByte() APIs that will consume the compressed
+	// buffers (r.cbufs).
+	d, _ := decompressorPool.Get().(io.ReadCloser)
+	if d == nil {
+		d = flate.NewReader(r)
+	} else {
+		d.(flate.Resetter).Reset(r, nil)
+	}
+	// This will do the decompression.
+	b, err := ioutil.ReadAll(d)
+	decompressorPool.Put(d)
+	// Now reset the compressed buffers list.
+	r.cbufs = nil
+	return b, err
 }
 
 // Handles the PING, PONG and CLOSE websocket control frames.
@@ -335,7 +413,6 @@ func (c *client) wsHandleControlFrame(r *wsReadInfo, frameType wsOpCode, nc io.R
 	var payload []byte
 	var err error
 
-	statusPos := pos
 	if r.rem > 0 {
 		payload, pos, err = wsGet(nc, buf, pos, r.rem)
 		if err != nil {
@@ -349,17 +426,24 @@ func (c *client) wsHandleControlFrame(r *wsReadInfo, frameType wsOpCode, nc io.R
 	switch frameType {
 	case wsCloseMessage:
 		status := wsCloseStatusNoStatusReceived
-		body := ""
-		// If there is a payload, it should contain 2 unsigned bytes
-		// that represent the status code and then optional payload.
-		if len(payload) >= 2 {
-			status = int(binary.BigEndian.Uint16(buf[statusPos : statusPos+2]))
-			body = string(buf[statusPos+2 : statusPos+len(payload)])
-			if body != "" && !utf8.ValidString(body) {
-				// https://tools.ietf.org/html/rfc6455#section-5.5.1
-				// If body is present, it must be a valid utf8
-				status = wsCloseStatusInvalidPayloadData
-				body = "invalid utf8 body in close frame"
+		var body string
+		lp := len(payload)
+		// If there is a payload, the status is represented as a 2-byte
+		// unsigned integer (in network byte order). Then, there may be an
+		// optional body.
+		hasStatus, hasBody := lp >= wsCloseSatusSize, lp > wsCloseSatusSize
+		if hasStatus {
+			// Decode the status
+			status = int(binary.BigEndian.Uint16(payload[:wsCloseSatusSize]))
+			// Now if there is a body, capture it and make sure this is a valid UTF-8.
+			if hasBody {
+				body = string(payload[wsCloseSatusSize:])
+				if !utf8.ValidString(body) {
+					// https://tools.ietf.org/html/rfc6455#section-5.5.1
+					// If body is present, it must be a valid utf8
+					status = wsCloseStatusInvalidPayloadData
+					body = "invalid utf8 body in close frame"
+				}
 			}
 		}
 		c.wsEnqueueControlMessage(wsCloseMessage, wsCreateCloseMessage(status, body))
@@ -1211,7 +1295,9 @@ func (c *client) wsCollapsePtoNB() (net.Buffers, int64) {
 					final = true
 				}
 				fh := make([]byte, wsMaxFrameHeaderSize)
-				n, key := wsFillFrameHeader(fh, mask, first, final, wsCompressedFrame, wsBinaryMessage, lp)
+				// Only the first frame should be marked as compressed, so pass
+				// `first` for the compressed boolean.
+				n, key := wsFillFrameHeader(fh, mask, first, final, first, wsBinaryMessage, lp)
 				if mask {
 					wsMaskBuf(key, p[:lp])
 				}
@@ -1304,4 +1390,8 @@ func (c *client) wsCollapsePtoNB() (net.Buffers, int64) {
 
 func isWSURL(u *url.URL) bool {
 	return strings.HasPrefix(strings.ToLower(u.Scheme), wsSchemePrefix)
+}
+
+func isWSSURL(u *url.URL) bool {
+	return strings.HasPrefix(strings.ToLower(u.Scheme), wsSchemePrefixTLS)
 }

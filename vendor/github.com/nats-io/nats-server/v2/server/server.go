@@ -79,6 +79,7 @@ type Info struct {
 	Nonce             string   `json:"nonce,omitempty"`
 	Cluster           string   `json:"cluster,omitempty"`
 	Dynamic           bool     `json:"cluster_dynamic,omitempty"`
+	Domain            string   `json:"domain,omitempty"`
 	ClientConnectURLs []string `json:"connect_urls,omitempty"`    // Contains URLs a client can connect to.
 	WSConnectURLs     []string `json:"ws_connect_urls,omitempty"` // Contains URLs a ws client can connect to.
 	LameDuckMode      bool     `json:"ldm,omitempty"`
@@ -236,6 +237,9 @@ type Server struct {
 	// MQTT structure
 	mqtt srvMQTT
 
+	// OCSP monitoring
+	ocsps []*OCSPMonitor
+
 	// exporting account name the importer experienced issues with
 	incompleteAccExporterMap sync.Map
 
@@ -247,17 +251,27 @@ type Server struct {
 	rnMu      sync.RWMutex
 	raftNodes map[string]RaftNode
 
-	// For mapping from a raft node name back to a server name and cluster.
+	// For mapping from a raft node name back to a server name and cluster. Node has to be in the same domain.
 	nodeToInfo sync.Map
 
 	// For out of resources to not log errors too fast.
 	rerrMu   sync.Mutex
 	rerrLast time.Time
+
+	// If there is a system account configured, to still support the $G account,
+	// the server will create a fake user and add it to the list of users.
+	// Keep track of what that user name is for config reload purposes.
+	sysAccOnlyNoAuthUser string
+
+	// How often user logon fails due to the issuer account not being pinned.
+	pinnedAccFail uint64
 }
 
+// For tracking JS nodes.
 type nodeInfo struct {
 	name    string
 	cluster string
+	domain  string
 	id      string
 	offline bool
 	js      bool
@@ -323,6 +337,7 @@ func NewServer(opts *Options) (*Server, error) {
 		JetStream:    opts.JetStream,
 		Headers:      !opts.NoHeaderSupport,
 		Cluster:      opts.Cluster.Name,
+		Domain:       opts.JetStreamDomain,
 	}
 
 	if tlsReq && !info.TLSRequired {
@@ -370,7 +385,7 @@ func NewServer(opts *Options) (*Server, error) {
 
 	// Place ourselves in some lookup maps.
 	ourNode := string(getHash(serverName))
-	s.nodeToInfo.Store(ourNode, nodeInfo{serverName, opts.Cluster.Name, info.ID, false, opts.JetStream})
+	s.nodeToInfo.Store(ourNode, nodeInfo{serverName, opts.Cluster.Name, opts.JetStreamDomain, info.ID, false, opts.JetStream})
 
 	s.routeResolver = opts.Cluster.resolver
 	if s.routeResolver == nil {
@@ -384,6 +399,12 @@ func NewServer(opts *Options) (*Server, error) {
 
 	// Ensure that non-exported options (used in tests) are properly set.
 	s.setLeafNodeNonExportedOptions()
+
+	// Setup OCSP Stapling. This will abort server from starting if there
+	// are no valid staples and OCSP policy is to Always or MustStaple.
+	if err := s.enableOCSP(); err != nil {
+		return nil, err
+	}
 
 	// Call this even if there is no gateway defined. It will
 	// initialize the structure so we don't have to check for
@@ -581,6 +602,10 @@ func validateOptions(o *Options) error {
 		return fmt.Errorf("lame duck grace period (%v) should be strictly lower than lame duck duration (%v)",
 			o.LameDuckGracePeriod, o.LameDuckDuration)
 	}
+	if int64(o.MaxPayload) > o.MaxPending {
+		return fmt.Errorf("max_payload (%v) cannot be higher than max_pending (%v)",
+			o.MaxPayload, o.MaxPending)
+	}
 	// Check that the trust configuration is correct.
 	if err := validateTrustedOperators(o); err != nil {
 		return err
@@ -747,15 +772,21 @@ func (s *Server) configureAccounts() error {
 		// We would do this to add user/pass to the system account. If this is the case add in
 		// no-auth-user for $G.
 		if numAccounts == 2 && s.opts.NoAuthUser == _EMPTY_ {
-			// Create a unique name so we do not collide.
-			var b [8]byte
-			rn := rand.Int63()
-			for i, l := 0, rn; i < len(b); i++ {
-				b[i] = digits[l%base]
-				l /= base
+			// If we come here from config reload, let's not recreate the fake user name otherwise
+			// it will cause currently clients to be disconnected.
+			uname := s.sysAccOnlyNoAuthUser
+			if uname == _EMPTY_ {
+				// Create a unique name so we do not collide.
+				var b [8]byte
+				rn := rand.Int63()
+				for i, l := 0, rn; i < len(b); i++ {
+					b[i] = digits[l%base]
+					l /= base
+				}
+				uname = fmt.Sprintf("nats-%s", b[:])
+				s.sysAccOnlyNoAuthUser = uname
 			}
-			uname := fmt.Sprintf("nats-%s", b[:])
-			s.opts.Users = append(s.opts.Users, &User{Username: uname, Password: string(b[:]), Account: s.gacc})
+			s.opts.Users = append(s.opts.Users, &User{Username: uname, Password: uname[6:], Account: s.gacc})
 			s.opts.NoAuthUser = uname
 		}
 	}
@@ -1291,6 +1322,12 @@ func (s *Server) registerAccountNoLock(acc *Account) *Account {
 	s.accounts.Store(acc.Name, acc)
 	s.tmpAccounts.Delete(acc.Name)
 	s.enableAccountTracking(acc)
+
+	// Can not have server lock here.
+	s.mu.Unlock()
+	s.registerSystemImports(acc)
+	s.mu.Lock()
+
 	return nil
 }
 
@@ -1353,7 +1390,7 @@ func (s *Server) updateAccountWithClaimJWT(acc *Account, claimJWT string) error 
 		return ErrMissingAccount
 	}
 	acc.mu.RLock()
-	sameClaim := acc.claimJWT != "" && acc.claimJWT == claimJWT && !acc.incomplete
+	sameClaim := acc.claimJWT != _EMPTY_ && acc.claimJWT == claimJWT && !acc.incomplete
 	acc.mu.RUnlock()
 	if sameClaim {
 		s.Debugf("Requested account update for [%s], same claims detected", acc.Name)
@@ -1362,7 +1399,7 @@ func (s *Server) updateAccountWithClaimJWT(acc *Account, claimJWT string) error 
 	accClaims, _, err := s.verifyAccountClaims(claimJWT)
 	if err == nil && accClaims != nil {
 		acc.mu.Lock()
-		if acc.Issuer == "" {
+		if acc.Issuer == _EMPTY_ {
 			acc.Issuer = accClaims.Issuer
 		}
 		if acc.Name != accClaims.Subject {
@@ -1520,6 +1557,10 @@ func (s *Server) Start() {
 	if hasOperators && opts.SystemAccount == _EMPTY_ {
 		s.Warnf("Trusted Operators should utilize a System Account")
 	}
+	if opts.MaxPayload > MAX_PAYLOAD_MAX_SIZE {
+		s.Warnf("Maximum payloads over %v are generally discouraged and could lead to poor performance",
+			friendlyBytes(int64(MAX_PAYLOAD_MAX_SIZE)))
+	}
 
 	// If we have a memory resolver, check the accounts here for validation exceptions.
 	// This allows them to be logged right away vs when they are accessed via a client.
@@ -1606,8 +1647,18 @@ func (s *Server) Start() {
 		}
 	} else {
 		// Check to see if any configured accounts have JetStream enabled.
+		sa, ga := s.SystemAccount(), s.GlobalAccount()
+		var hasSys, hasGlobal bool
+		var total int
+
 		s.accounts.Range(func(k, v interface{}) bool {
+			total++
 			acc := v.(*Account)
+			if acc == sa {
+				hasSys = true
+			} else if acc == ga {
+				hasGlobal = true
+			}
 			acc.mu.RLock()
 			hasJs := acc.jsLimits != nil
 			acc.mu.RUnlock()
@@ -1617,9 +1668,21 @@ func (s *Server) Start() {
 			}
 			return true
 		})
+		// If we only have the system account and the global account and we are not standalone,
+		// go ahead and enable JS on $G in case we are in simple mixed mode setup.
+		if total == 2 && hasSys && hasGlobal && !s.standAloneMode() {
+			ga.mu.Lock()
+			ga.jsLimits = dynamicJSAccountLimits
+			ga.mu.Unlock()
+			s.checkJetStreamExports()
+			ga.enableAllJetStreamServiceImportsAndMappings()
+		}
 	}
 
-	// Start monitoring if needed
+	// Start OCSP Stapling monitoring for TLS certificates if enabled.
+	s.startOCSPMonitoring()
+
+	// Start monitoring if needed.
 	if err := s.StartMonitoring(); err != nil {
 		s.Fatalf("Can't start monitoring: %v", err)
 		return
@@ -1971,7 +2034,7 @@ func (s *Server) setInfoHostPort() error {
 	// When this function is called, opts.Port is set to the actual listen
 	// port (if option was originally set to RANDOM), even during a config
 	// reload. So use of s.opts.Port is safe.
-	if s.opts.ClientAdvertise != "" {
+	if s.opts.ClientAdvertise != _EMPTY_ {
 		h, p, err := parseHostPort(s.opts.ClientAdvertise, s.opts.Port)
 		if err != nil {
 			return err
