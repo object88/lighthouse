@@ -1,4 +1,4 @@
-// +build buildtools
+//go:build buildtools
 
 package buildtools
 
@@ -10,5 +10,5 @@ package buildtools
 
 import (
 	// The go-bindata program is used in the prebuild step for shipyard.
-	_ "k8s.io/code-generator"
+	_ "sigs.k8s.io/controller-tools/cmd/controller-gen"
 )

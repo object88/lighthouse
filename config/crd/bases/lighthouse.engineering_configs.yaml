@@ -1,0 +1,118 @@
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.4.1
+  creationTimestamp: null
+  name: configs.lighthouse.engineering
+spec:
+  group: lighthouse.engineering
+  names:
+    kind: Config
+    listKind: ConfigList
+    plural: configs
+    singular: config
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Config describes a target configuration
+        properties:
+          apiVersion:
+            description: 'APIVersion defines the versioned schema of this representation
+              of an object. Servers should convert recognized schemas to the latest
+              internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
+            type: string
+          kind:
+            description: 'Kind is a string value representing the REST resource this
+              object represents. Servers may infer this from the endpoint the client
+              submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ConfigSpec is the spec for a Config
+            properties:
+              match:
+                description: Match is a list of match items which consist of select
+                  queries and expected match values or regular expressions. When all
+                  match items for an object are positive, the rule is in effect.
+                items:
+                  description: MatchItem represents a single match query.
+                  properties:
+                    matchFor:
+                      description: 'MatchFor instructs how to match the results against
+                        the match... requirements. Valid values are: - "Any" - the
+                        match is considered positive if any of the results of select
+                        have a match. - "All" - the match is considered positive only
+                        if all of the results of select have a match.'
+                      enum:
+                      - Any
+                      - All
+                      type: string
+                    matchRegex:
+                      description: MatchRegex specifies the regular expression to
+                        compare the result of Select by. The match is considered positive
+                        if at least one of the results of evaluating the select query
+                        yields a match when compared to value.
+                      nullable: true
+                      type: string
+                    matchValue:
+                      description: MatchValue specifies the exact value to match the
+                        result of Select by. The match is considered positive if at
+                        least one of the results of evaluating the select query yields
+                        a match when compared to matchValue.
+                      nullable: true
+                      type: string
+                    matchValues:
+                      description: MatchValues specifies a list of values to match
+                        the result of Select by. The match is considered positive
+                        if at least one of the results of evaluating the select query
+                        yields a match when compared to any of the values in the array.
+                      items:
+                        type: string
+                      type: array
+                    negate:
+                      description: Negate indicates whether the match result should
+                        be to inverted. Defaults to false.
+                      type: boolean
+                    select:
+                      description: 'Select is a JSONPath query expression: https://goessner.net/articles/JsonPath/
+                        which yields zero or more values. If no match value or regex
+                        is specified, if the query yields a non-empty result, the
+                        match is considered positive.'
+                      type: string
+                  required:
+                  - select
+                  type: object
+                minItems: 1
+                type: array
+              releasename:
+                type: string
+            required:
+            - match
+            - releasename
+            type: object
+          status:
+            description: ConfigStatus is the status for a Config resource
+            properties:
+              deployedat:
+                format: date-time
+                type: string
+            required:
+            - deployedat
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+status:
+  acceptedNames:
+    kind: ""
+    plural: ""
+  conditions: []
+  storedVersions: []
