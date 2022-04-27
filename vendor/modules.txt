@@ -122,8 +122,8 @@ github.com/josharian/intern
 # github.com/json-iterator/go v1.1.12
 ## explicit; go 1.12
 github.com/json-iterator/go
-# github.com/klauspost/compress v1.13.4
-## explicit; go 1.13
+# github.com/klauspost/compress v1.14.4
+## explicit; go 1.15
 github.com/klauspost/compress/s2
 # github.com/liggitt/tabwriter v0.0.0-20181228230101-89fcab3d43de
 ## explicit
@@ -145,7 +145,7 @@ github.com/mattn/go-isatty
 # github.com/matttproud/golang_protobuf_extensions v1.0.2-0.20181231171920-c182affec369
 ## explicit; go 1.9
 github.com/matttproud/golang_protobuf_extensions/pbutil
-# github.com/minio/highwayhash v1.0.1
+# github.com/minio/highwayhash v1.0.2
 ## explicit; go 1.15
 github.com/minio/highwayhash
 # github.com/mitchellh/mapstructure v1.4.3
@@ -160,11 +160,11 @@ github.com/modern-go/reflect2
 # github.com/monochromegane/go-gitignore v0.0.0-20200626010858-205db1a8cc00
 ## explicit
 github.com/monochromegane/go-gitignore
-# github.com/nats-io/jwt/v2 v2.0.3
-## explicit; go 1.14
-github.com/nats-io/jwt/v2
-# github.com/nats-io/nats-server/v2 v2.6.1
+# github.com/nats-io/jwt/v2 v2.2.1-0.20220330180145-442af02fd36a
 ## explicit; go 1.16
+github.com/nats-io/jwt/v2
+# github.com/nats-io/nats-server/v2 v2.8.1
+## explicit; go 1.17
 github.com/nats-io/nats-server/v2/conf
 github.com/nats-io/nats-server/v2/internal/ldap
 github.com/nats-io/nats-server/v2/logger
@@ -172,7 +172,7 @@ github.com/nats-io/nats-server/v2/server
 github.com/nats-io/nats-server/v2/server/pse
 github.com/nats-io/nats-server/v2/server/sysmem
 github.com/nats-io/nats-server/v2/test
-# github.com/nats-io/nats.go v1.12.3
+# github.com/nats-io/nats.go v1.14.0
 ## explicit; go 1.16
 github.com/nats-io/nats.go
 github.com/nats-io/nats.go/encoders/builtin
@@ -331,7 +331,7 @@ golang.org/x/text/transform
 golang.org/x/text/unicode/bidi
 golang.org/x/text/unicode/norm
 golang.org/x/text/width
-# golang.org/x/time v0.0.0-20210723032227-1f47c861a9ac
+# golang.org/x/time v0.0.0-20211116232009-f0f3c7e86c11
 ## explicit
 golang.org/x/time/rate
 # golang.org/x/tools v0.1.5
